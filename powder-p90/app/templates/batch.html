@@ -3,6 +3,16 @@
 <div class="card">
   <h2>批号 {{ name }} 的全部已入库档表</h2>
   <p class="muted">共 {{ tables|length }} 张档表，均已通过两两/整体相容性校验，可由同一组粒径产生。</p>
+  {% if sheet %}
+  <p>筛分核对：<span class="pill">{{ role_names[sheet.role] }} · 核对单 #{{ sheet.id }} · 筛孔 {{ sheet.aperture }} 微米</span></p>
+  <p class="muted">同单批次：
+    原批 {{ sheet.feed.name if sheet.feed else '—' }}；
+    筛下批 {{ sheet.undersize.name if sheet.undersize else '—' }}；
+    筛上批 {{ sheet.oversize.name if sheet.oversize else '—' }}。
+    在此批补报档表时，系统会按入库档表对整张核对单重做筛分核对，不通过则本次不写入。</p>
+  {% else %}
+  <p class="muted">该批尚未登记筛分核对单。</p>
+  {% endif %}
   {% for t in tables %}
   <h3 style="font-size:14px;margin:16px 0 6px">档表 #{{ t.meta.id }}
     <span class="pill">{{ t.meta.total }} 粒</span>

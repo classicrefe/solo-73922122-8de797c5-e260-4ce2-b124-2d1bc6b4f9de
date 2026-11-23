@@ -15,21 +15,86 @@ placeholder="lo hi count
 20 29 280
 30 39 50"></textarea>
     <p style="margin-top:10px"><button type="submit">提交档表</button>
-       <span class="muted">批号已存在时按补报处理，系统先校验与该批全部已入库档表的相容性。</span></p>
+       <span class="muted">批号已存在时按补报处理：先校验与该批全部已入库档表的相容性；若该批已在核对单上，还会对整张单重做筛分核对，不通过则本次不写入。</span></p>
   </form>
+</div>
+
+<div class="card">
+  <h2>② 登记筛分核对单</h2>
+  {% if batches|length >= 3 %}
+  <form method="post" action="{{ url_for('register_screening') }}">
+    <p class="muted">从已入库批次中选出原批、筛下批、筛上批（三个批号须不同），填写整数微米筛孔尺寸。
+      核对口径：三批全部档表须能由一次筛分同时得到；原批中粒径小于筛孔的粒子全部归筛下批，其余全部归筛上批。通过才登记，同一批只能登记在一张单上。</p>
+    <table>
+      <thead><tr><th class="l">角色</th><th class="l">选择已入库批次</th></tr></thead>
+      <tbody>
+      {% for role in ['feed', 'undersize', 'oversize'] %}
+        <tr>
+          <td class="l">{{ role_names[role] }}</td>
+          <td class="l">
+            <select name="{{ role }}_batch" required>
+              <option value="">— 请选择 —</option>
+              {% for b in batches %}
+                <option value="{{ b.id }}"
+                  {% if role_by_batch.get(b.id) %}disabled title="已登记在核对单 #{{ role_by_batch[b.id].sheet_id }}"{% endif %}>
+                  {{ b.name }}{% if b.total is not none %}（{{ b.total }} 粒）{% endif %}
+                  {% if role_by_batch.get(b.id) %} · 已登记{% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          </td>
+        </tr>
+      {% endfor %}
+        <tr>
+          <td class="l">筛孔尺寸（微米）</td>
+          <td class="l"><input type="text" name="aperture" required inputmode="numeric"
+                               placeholder="整数，例如 100" style="width:180px">
+            <span class="muted">只收整数微米，不接受小数点或单位。</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <p style="margin-top:12px"><button type="submit">核对并登记</button>
+      <span class="muted">核对期间其他批仍可补报；若有冲突，页面指出原因且本次不写入。</span></p>
+  </form>
+  {% else %}
+  <p class="muted">至少需要三个已入库批次才能登记核对单，当前只有 {{ batches|length }} 个。</p>
+  {% endif %}
+  {% if sheets %}
+  <h3 style="font-size:14px;margin:18px 0 6px">已登记核对单</h3>
+  <table>
+    <thead><tr><th>单号</th><th>筛孔（微米）</th><th class="l">原批</th><th class="l">筛下批</th><th class="l">筛上批</th><th class="l">登记时间</th></tr></thead>
+    <tbody>
+    {% for s in sheets %}
+      <tr>
+        <td>#{{ s.id }}</td>
+        <td>{{ s.aperture }}</td>
+        {% for role in ['feed', 'undersize', 'oversize'] %}
+          <td class="l">{% if s[role] %}{{ s[role].name }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        {% endfor %}
+        <td class="l">{{ s.created_at }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
 </div>
 
 <form method="post" action="{{ url_for('compute') }}">
 <div class="card">
-  <h2>② 勾选批次并核算合并 P90</h2>
+  <h2>③ 勾选批次并核算合并 P90</h2>
   {% if batches %}
   <table>
-    <thead><tr><th style="width:40px">选</th><th class="l">批号</th><th>已入库档表数</th><th>总粒数（每表一致）</th><th>创建时间</th><th class="l">操作</th></tr></thead>
+    <thead><tr><th style="width:40px">选</th><th class="l">批号</th><th class="l">核对单角色</th><th>已入库档表数</th><th>总粒数（每表一致）</th><th>创建时间</th><th class="l">操作</th></tr></thead>
     <tbody>
     {% for b in batches %}
       <tr>
         <td><input type="checkbox" name="batch_ids" value="{{ b.id }}"></td>
         <td class="l">{{ b.name }}</td>
+        <td class="l">
+          {% if role_by_batch.get(b.id) %}
+            <span class="pill">{{ role_names[role_by_batch[b.id].role] }} · 单 #{{ role_by_batch[b.id].sheet_id }} · 筛孔 {{ role_by_batch[b.id].aperture }}</span>
+          {% else %}<span class="muted">未登记</span>{% endif %}
+        </td>
         <td>{{ b.table_count }}</td>
         <td>{{ b.total }}</td>
         <td>{{ b.created_at }}</td>
@@ -39,7 +104,8 @@ placeholder="lo hi count
     </tbody>
   </table>
   <p style="margin-top:12px"><button type="submit">核算合并 P90 最紧界</button>
-     <span class="muted">P90 = 升序第 ⌈0.9×总粒数⌉ 粒；结果附两份达到端点的逐批粒径频数见证。</span></p>
+     <span class="muted">P90 = 升序第 ⌈0.9×总粒数⌉ 粒；结果附两份达到端点的逐批粒径频数见证。
+     同一核对单的原批与任一产物不能同时勾选（会拦下并说明原因），两个产物可以一起核算。</span></p>
   {% else %}
   <p class="muted">还没有任何批次，请先在上方上传档表。</p>
   {% endif %}

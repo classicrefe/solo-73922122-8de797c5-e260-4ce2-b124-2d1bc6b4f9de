@@ -300,6 +300,145 @@ def verify_witness(freq: dict[int, int], tables: list[BinTable]) -> None:
                 )
 
 
+# ---------------------------------------------------------------------------
+# 筛分核对：原批 = 筛下批（< 筛孔） + 筛上批（>= 筛孔）
+# ---------------------------------------------------------------------------
+
+ROLE_NAMES = {"feed": "原批", "undersize": "筛下批", "oversize": "筛上批"}
+
+
+def _cut_conflict(c: int, low_src: str, low: int, up_src: str, up: int) -> str:
+    return (
+        f"在切割点 c={c} 微米（粒径 <{c} 的粒数）处：{low_src}要求至少 {low} 粒，"
+        f"但{up_src}至多允许 {up} 粒"
+    )
+
+
+def screening_compatible(
+    feed_tables: list[BinTable],
+    undersize_tables: list[BinTable],
+    oversize_tables: list[BinTable],
+    aperture: int,
+) -> tuple[bool, str]:
+    """核对三批能否由**一次筛分**得到（全程按档，不逐粒展开）。
+
+    筛分关系：原批中粒径 < aperture 的粒子全部进入筛下批，其余（>= aperture）
+    全部进入筛上批。等价于存在一个非递减整数累计函数 A(c)=「原批粒径 < c 的
+    粒数」，同时满足：
+
+      * 原批全部档表的累计走廊：L_F(c) <= A(c) <= U_F(c)；
+      * 筛下批全部档表：c <= aperture 时 L_U(c) <= A(c) <= U_U(c)；
+        c > aperture 时筛下批已无后续粒子，要求 N_U 落在 [L_U(c), U_U(c)]；
+      * 筛上批：c <= aperture 时累计必须为 0，要求 L_O(c) = 0；
+        c > aperture 时 L_O(c) <= A(c)-N_U <= U_O(c)；
+      * 总粒数守恒 N_F = N_U + N_O，且 A(aperture) = N_U（筛孔以下全部归筛下）。
+
+    在所有档表切割点与 aperture 的并集上做贪心（每点取满足下界的最小值），
+    因 L/U 单调，贪心失败即不可行。复杂度 O(三批档数 + 全局切割点数)。
+    """
+    if not isinstance(aperture, int) or isinstance(aperture, bool):
+        return False, "筛孔尺寸须为整数微米"
+    if aperture <= 0:
+        return False, "筛孔尺寸须为正整数微米（大于 0）"
+    if aperture > MAX_MICRON:
+        return False, f"筛孔尺寸 {aperture} 超出允许范围（1..{MAX_MICRON}）"
+
+    for role, tables in (
+        ("feed", feed_tables),
+        ("undersize", undersize_tables),
+        ("oversize", oversize_tables),
+    ):
+        label = ROLE_NAMES[role]
+        if not tables:
+            return False, f"{label}没有任何已入库档表"
+        ok, reason = compatible(tables)
+        if not ok:
+            return False, f"{label}的已入库档表彼此不相容：{reason}"
+
+    n_feed = feed_tables[0].total
+    n_under = undersize_tables[0].total
+    n_over = oversize_tables[0].total
+    if n_feed != n_under + n_over:
+        return False, (
+            f"总粒数不守恒：原批 {n_feed} 粒 ≠ 筛下批 {n_under} 粒 + "
+            f"筛上批 {n_over} 粒 = {n_under + n_over} 粒"
+        )
+
+    all_tables = list(feed_tables) + list(undersize_tables) + list(oversize_tables)
+    cuts = sorted(set(_union_cuts(all_tables)) | {aperture})
+    lf, uf = batch_bounds(feed_tables, cuts)
+    lu, uu = batch_bounds(undersize_tables, cuts)
+    lo, uo = batch_bounds(oversize_tables, cuts)
+
+    prev = 0
+    for j, c in enumerate(cuts):
+        low, low_src = lf[j], "原批的档表"
+        up, up_src = uf[j], "原批的档表"
+
+        if c <= aperture:
+            if lu[j] > low:
+                low, low_src = lu[j], "筛下批的档表"
+            if uu[j] < up:
+                up, up_src = uu[j], "筛下批的档表"
+            # 筛上批不含 < aperture 的粒子，其累计在此处必须为 0。
+            if lo[j] > 0:
+                return False, (
+                    f"筛上批的档表在切割点 c={c} 微米处要求至少有 {lo[j]} 粒"
+                    f"粒径 <{c}，但按筛分关系筛上批只能含 ≥{aperture} 微米的粒子"
+                )
+            # 筛下批所有粒子都 < aperture：在 c=aperture 处其累计必须恰为 N_U，
+            # 即 A(aperture)=N_U 必须仍落在三批走廊允许的区间内。
+            if c == aperture:
+                if n_under < low:
+                    return False, (
+                        f"在筛孔 c={aperture} 微米处：{low_src}要求粒径 <{aperture} 的"
+                        f"粒子至少 {low} 粒，但筛下批总粒数只有 {n_under} 粒；"
+                        "按筛分关系筛孔以下的粒子应全部归筛下批"
+                    )
+                if n_under > up:
+                    return False, (
+                        f"在筛孔 c={aperture} 微米处：{up_src}至多允许粒径 <{aperture} 的"
+                        f"粒子 {up} 粒，但筛下批总粒数为 {n_under} 粒；"
+                        "按筛分关系筛孔以下的粒子应全部归筛下批"
+                    )
+                low, low_src = n_under, "筛下批总量（筛孔以下全部归筛下）"
+                up, up_src = n_under, "筛下批总量（筛孔以下全部归筛下）"
+        else:
+            # 筛下批总粒数 n_under 全部 < aperture，在 c>aperture 处累计已封顶。
+            if lu[j] > n_under:
+                return False, (
+                    f"筛下批的档表在切割点 c={c} 微米处要求至少有 {lu[j]} 粒"
+                    f"粒径 <{c}，但筛下批总粒数只有 {n_under} 粒"
+                )
+            if n_under > uu[j]:
+                return False, (
+                    f"筛下批的档表在切割点 c={c} 微米处至多允许 {uu[j]} 粒粒径 "
+                    f"<{c}，但筛下批总粒数为 {n_under} 粒；按筛分关系筛下批只能含 "
+                    f"<{aperture} 微米的粒子，多出的 {n_under - uu[j]} 粒无处安放"
+                )
+            cand = lo[j] + n_under
+            if cand > low:
+                low, low_src = cand, "筛上批的档表"
+            cand_up = uo[j] + n_under
+            if cand_up < up:
+                up, up_src = cand_up, "筛上批的档表"
+
+        if low > up:
+            return False, _cut_conflict(c, low_src, low, up_src, up)
+        value = prev if prev > low else low
+        if value > up:
+            return False, (
+                f"在切割点 c={c} 微米处：前序约束已要求粒径 <{c} 的粒数至少 "
+                f"{prev} 粒，但{up_src}至多允许 {up} 粒"
+            )
+        prev = value
+
+    # 最后一个切割点之后没有粒子；原批走廊在此处已闭合为 N_F。
+    if prev > n_feed:
+        return False, f"累计粒数 {prev} 超出原批总粒数 {n_feed}"
+    return True, ""
+
+
 def _order_stat(freqs: dict[int, dict[int, int]], k: int) -> int:
     """合并各批频数，求升序第 k 小粒径（k 从 1 开始）。按粒径聚合，不逐粒展开。"""
     merged: dict[int, int] = {}
